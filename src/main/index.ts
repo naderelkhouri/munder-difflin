@@ -17,12 +17,10 @@ import {
   readConfig, writeConfig, setAgentTokenCap, resetConfig, onConfigWritten, ensureHarnessHome, ensureClaudePermissionsAccepted,
   modelForRole, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
-import { listDir, readFileText, readFileBinary, writeFileText, statAbs, expandTilde } from './fs';
+import { expandTilde } from './fs';
 import { normalizeWeekly, weeklyDelayMs } from '../shared/weeklySchedule';
 import {
-  getBranch, getStatus, getLog, getBranches, getAheadBehind, isRepo, getDiff, mainRepoRoot,
-  addWorktree, removeWorktree, worktreeHasUnintegratedWork, worktreeIsGcSafe,
-  getLogGraph, getCommitFiles, getFileAtRev, compareRefs, listWorktrees, checkoutRef
+  isRepo, getBranch, addWorktree, removeWorktree, worktreeHasUnintegratedWork, worktreeIsGcSafe
 } from './git';
 import { linkWorktreeDeps, unlinkWorktreeDeps } from './worktreeDeps';
 import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
@@ -33,7 +31,8 @@ import { MemoryManager } from './memory';
 import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
-import { readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd } from './transcript';
+import { readAgentUsage, readContextTokens, seedSessionTranscript } from './transcript';
+import { registerModularIpc } from './ipc';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply, type SlackEventFile } from './slack';
 import {
@@ -109,6 +108,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const ptyManager = new PtyManager();
+registerModularIpc({ ptyManager });
 
 function runCodexDaemonCommand(
   executable: string,
@@ -3048,63 +3048,7 @@ ipcMain.handle('analytics:messageSent', (_evt, surface: unknown) => {
   return { ok: true };
 });
 
-// Resolve a pasted Claude session id to the cwd it originally ran in, so the Add
-// Agent dialog can auto-fill the folder for a resume (#2 zero-step resume). Reads
-// the cwd from a transcript record; null when the id is invalid/unknown.
-ipcMain.handle('session:resolveCwd', (_evt, sessionId: unknown) =>
-  (typeof sessionId === 'string' ? resolveSessionCwd(sessionId) : null));
-
-// ─── IPC: clipboard ─────────────────────────────────────────────────────────
-ipcMain.handle('app:copyToClipboard', (_evt, text: unknown) => {
-  if (typeof text !== 'string') return { ok: false, error: 'invalid text' };
-  try { clipboard.writeText(text); return { ok: true }; }
-  catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
-});
-ipcMain.handle('app:readClipboard', () => {
-  try { return clipboard.readText(); } catch { return ''; }
-});
-// Same read, SYNCHRONOUS, for the terminal's paste shortcut.
-//
-// Dictation tools (muesli.works, Wispr Flow, …) type by stashing the user's
-// clipboard, writing the transcript, sending the paste key, then restoring the
-// old clipboard immediately. An `invoke` read returns a tick or two later — by
-// which point the restore has already landed and we paste the PREVIOUS text.
-// A `sendSync` read completes inside the keydown handler, before the tool gets
-// a chance to put the old contents back.
-ipcMain.on('app:readClipboardSync', (evt) => {
-  try { evt.returnValue = clipboard.readText(); } catch { evt.returnValue = ''; }
-});
-// NOTE: the terminal theme is mirrored into each agent's per-session Claude
-// settings at spawn (hive.ensureAgent theme option) — deliberately NOT via
-// `claude config set -g theme`, which would also restyle the user's own
-// Claude sessions outside the app.
-
-// ─── IPC: folder picker ─────────────────────────────────────────────────────
-ipcMain.handle('dialog:chooseFolder', async (evt) => {
-  const win = BrowserWindow.fromWebContents(evt.sender);
-  if (!win) return { ok: false as const, error: 'no window' };
-  const res = await dialog.showOpenDialog(win, {
-    properties: ['openDirectory', 'createDirectory'],
-    title: 'Pick a folder'
-  });
-  if (res.canceled || res.filePaths.length === 0) return { ok: false as const, error: 'cancelled' };
-  return { ok: true as const, path: res.filePaths[0] };
-});
-
-// ─── IPC: Terminal.app at a folder ──────────────────────────────────────────
-ipcMain.handle('terminal:openAtFolder', async (_evt, cwd: unknown) => {
-  if (typeof cwd !== 'string' || cwd.length === 0) return { ok: false, error: 'invalid cwd' };
-  return new Promise<{ ok: boolean; error?: string }>((resolve) => {
-    const p = spawn('open', ['-a', 'Terminal', cwd]);
-    let err = '';
-    p.stderr.on('data', (d) => { err += d.toString(); });
-    p.on('error', (e) => resolve({ ok: false, error: e.message }));
-    p.on('close', (code) => {
-      if (code === 0) resolve({ ok: true });
-      else resolve({ ok: false, error: err.trim() || `open exited ${code}` });
-    });
-  });
-});
+// ─── IPC: app / clipboard / dialog / terminal (delegated to ./ipc/appIpc) ────
 
 // ─── IPC: integrations (Phase 2 registry — backend for Ryan's Settings UI) ────
 // Records are metadata only (config-backed); secrets are encrypted at rest and NEVER
@@ -3298,145 +3242,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   return { ok: true as const }; // unreachable (process exits) — typed for the renderer
 });
 
-// ─── IPC: filesystem (sandboxed to a root) ──────────────────────────────────
-ipcMain.handle('fs:listDir', (_evt, root: unknown, rel: unknown) => {
-  if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
-  return listDir(root, rel);
-});
-ipcMain.handle('fs:readFile', (_evt, root: unknown, rel: unknown) => {
-  if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
-  return readFileText(root, rel);
-});
-// Raw bytes for files the text reader refuses (images). The renderer cannot
-// load them off disk itself — the CSP has no `file:` source and no file
-// protocol is registered — so the bytes come through here and become a `blob:`
-// URL on the other side. Same root confinement as every other fs handler.
-ipcMain.handle('fs:readBinary', (_evt, root: unknown, rel: unknown) => {
-  if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
-  return readFileBinary(root, rel);
-});
-ipcMain.handle('fs:writeFile', (_evt, root: unknown, rel: unknown, content: unknown) => {
-  if (typeof root !== 'string' || typeof rel !== 'string' || typeof content !== 'string') {
-    return { ok: false, error: 'invalid args' };
-  }
-  return writeFileText(root, rel, content);
-});
-// v0.3.4: existence check for the terminal ⌘-click markdown flow (metadata only).
-ipcMain.handle('fs:statAbs', (_evt, p: unknown) => {
-  if (typeof p !== 'string' || p.length > 4096 || p.includes('\0')) {
-    return { exists: false, isFile: false, path: '' };
-  }
-  return statAbs(p);
-});
-
-/** Reveal a path in the OS file browser — Finder, Explorer, or whatever the
- *  Linux desktop registers. Backs ⌘-click on a terminal path we cannot open
- *  ourselves (an image, an archive, an unknown extension).
- *
- *  `showItemInFolder`, NEVER `shell.openPath`, for a file. The path arrives
- *  from agent output, and openPath hands an arbitrary file to its default
- *  application: a printed `installer.dmg` or `.desktop` would be one click from
- *  executing. Revealing only ever opens a file browser, so the worst an agent
- *  can achieve by printing a path is a window at a folder the user could
- *  already open themselves.
- *
- *  openPath IS used for a directory, and only after statAbs has confirmed it is
- *  one — a directory has no default application to launch, so the execution
- *  argument above does not apply, and revealing a folder inside its parent is
- *  not what "open this folder" means to anyone. */
-ipcMain.handle('fs:revealPath', async (_evt, p: unknown) => {
-  if (typeof p !== 'string' || !p.length || p.length > 4096 || p.includes('\0')) {
-    return { ok: false, error: 'bad request' };
-  }
-  const st = await statAbs(p);
-  if (!st.exists) return { ok: false, error: 'not found' };
-  if (st.isFile) { shell.showItemInFolder(st.path); return { ok: true }; }
-  const err = await shell.openPath(st.path);
-  return err ? { ok: false, error: err } : { ok: true };
-});
-
-// ─── IPC: git ───────────────────────────────────────────────────────────────
-ipcMain.handle('git:isRepo', (_evt, cwd: unknown) => {
-  if (typeof cwd !== 'string') return false;
-  return isRepo(cwd);
-});
-
-// The repo a cwd belongs to, following a linked worktree back to its main
-// checkout — the renderer groups the agent roster by this.
-ipcMain.handle('git:mainRepo', (_evt, cwd: unknown) => {
-  if (typeof cwd !== 'string' || !cwd) return null;
-  return mainRepoRoot(cwd);
-});
-ipcMain.handle('git:branch', (_evt, cwd: unknown) => {
-  if (typeof cwd !== 'string') return { error: 'invalid cwd' };
-  return getBranch(cwd);
-});
-ipcMain.handle('git:status', (_evt, cwd: unknown) => {
-  if (typeof cwd !== 'string') return { error: 'invalid cwd' };
-  return getStatus(cwd);
-});
-ipcMain.handle('git:log', (_evt, cwd: unknown, n: unknown) => {
-  if (typeof cwd !== 'string') return { error: 'invalid cwd' };
-  const count = typeof n === 'number' ? Math.min(500, Math.max(1, n)) : 50;
-  return getLog(cwd, count);
-});
-ipcMain.handle('git:branches', (_evt, cwd: unknown) => {
-  if (typeof cwd !== 'string') return { error: 'invalid cwd' };
-  return getBranches(cwd);
-});
-ipcMain.handle('git:aheadBehind', (_evt, cwd: unknown) => {
-  if (typeof cwd !== 'string') return { error: 'invalid cwd' };
-  return getAheadBehind(cwd);
-});
-ipcMain.handle('git:diff', (_evt, cwd: unknown, relPath: unknown) => {
-  if (typeof cwd !== 'string' || typeof relPath !== 'string') {
-    return { ok: false, error: 'invalid args' };
-  }
-  return getDiff(cwd, relPath);
-});
-// ─── v0.3.4: history / compare / checkout (git visualization) ───────────────
-ipcMain.handle('git:logGraph', (_evt, cwd: unknown, n: unknown, skip: unknown) => {
-  if (typeof cwd !== 'string') return { error: 'invalid args' };
-  const count = Math.min(500, Math.max(1, typeof n === 'number' ? n : 200));
-  const off = Math.max(0, typeof skip === 'number' ? skip : 0);
-  return getLogGraph(cwd, count, off);
-});
-ipcMain.handle('git:commitFiles', (_evt, cwd: unknown, sha: unknown) => {
-  if (typeof cwd !== 'string' || typeof sha !== 'string') return { error: 'invalid args' };
-  return getCommitFiles(cwd, sha);
-});
-ipcMain.handle('git:showFile', (_evt, cwd: unknown, rev: unknown, relPath: unknown) => {
-  if (typeof cwd !== 'string' || typeof rev !== 'string' || typeof relPath !== 'string') {
-    return { ok: false, error: 'invalid args' };
-  }
-  return getFileAtRev(cwd, rev, relPath);
-});
-ipcMain.handle('git:compareRefs', (_evt, cwd: unknown, base: unknown, head: unknown, mode: unknown) => {
-  if (typeof cwd !== 'string' || typeof base !== 'string' || typeof head !== 'string') {
-    return { error: 'invalid args' };
-  }
-  return compareRefs(cwd, base, head, mode === 'two' ? 'two' : 'three');
-});
-ipcMain.handle('git:worktrees', (_evt, cwd: unknown) => {
-  if (typeof cwd !== 'string') return { error: 'invalid args' };
-  return listWorktrees(cwd);
-});
-ipcMain.handle('git:checkout', async (_evt, cwd: unknown, ref: unknown, detach: unknown) => {
-  if (typeof cwd !== 'string' || typeof ref !== 'string') return { ok: false, error: 'invalid args' };
-  // Guard: never swap files under an actively-working agent. Objective signal
-  // owned by main — any live pty whose cwd sits in this tree and emitted output
-  // in the last 10s is treated as mid-run. (Idle-but-open terminals are fine:
-  // checkoutRef additionally requires a clean tree, and TUIs redraw on fs
-  // changes gracefully.)
-  const busy = ptyManager.list().find((p) =>
-    (p.cwd === cwd || p.cwd.startsWith(cwd.endsWith('/') ? cwd : `${cwd}/`)) &&
-    Date.now() - p.lastOutputAt < 10_000
-  );
-  if (busy) {
-    return { ok: false, error: `an agent is actively working in this repo (${busy.id}) — try again when it goes quiet` };
-  }
-  return checkoutRef(cwd, ref, detach === true);
-});
+// ─── IPC: filesystem & git (delegated to ./ipc/fsIpc and ./ipc/gitIpc) ──────
 
 // ─── IPC: roster mirror (shared between dev and a packaged build) ───────────
 // The renderer's store is built synchronously at module load, before any async
