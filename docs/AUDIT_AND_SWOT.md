@@ -106,15 +106,21 @@ A proposta de valor é ancorada em uma interface gráfica lúdica ("Animal Cross
 
 ## 4. Melhorias Implementadas Nesta Atualização
 
-1. **Modularização da Camada de IPC:**
+1. **Modularização da Camada de IPC (Fases 1 e 2):**
    * Criação do módulo [`src/main/ipc/fsIpc.ts`](../src/main/ipc/fsIpc.ts) com sandboxing seguro de arquivos.
    * Criação do módulo [`src/main/ipc/gitIpc.ts`](../src/main/ipc/gitIpc.ts) para visualização e operações de repositório.
    * Criação do módulo [`src/main/ipc/appIpc.ts`](../src/main/ipc/appIpc.ts) para gerenciamento de clipboard, diálogos nativos e launcher de terminal.
+   * Criação do módulo [`src/main/ipc/integrationsIpc.ts`](../src/main/ipc/integrationsIpc.ts) para registro seguro de REST integrations e chaves BYOK de provedores.
+   * Criação do módulo de compartilhamento [`src/shared/providerKeys.ts`](../src/shared/providerKeys.ts).
    * Criação do ponto de montagem central [`src/main/ipc/index.ts`](../src/main/ipc/index.ts).
-   * Refatoração limpa de [`src/main/index.ts`](../src/main/index.ts), reduzindo seu volume e isolando responsabilidades.
-2. **Verificação Completa de Integridade:**
+   * Refatoração contínua de [`src/main/index.ts`](../src/main/index.ts), reduzindo seu acoplamento e isolando responsabilidades.
+2. **Higiene de Dependências e Segurança:**
+   * Remoção de dependências órfãs `localtunnel` e `@types/localtunnel` (substituídas na v0.2.4 por `tunnelmole` mas retidas no manifesto).
+   * Redução das vulnerabilidades apontadas pelo `npm audit` de 22 para 20.
+   * Rebuild nativo bem-sucedido de `node-pty` e `better-sqlite3`.
+3. **Verificação Completa de Integridade:**
    * Execução de `npm run typecheck`: 0 erros de tipagem.
-   * Execução de `npm run test:focused`: 834/834 testes aprovados.
+   * Execução de `npm run test:focused`: 834/834 testes aprovados (100%).
 
 ---
 
@@ -122,7 +128,7 @@ A proposta de valor é ancorada em uma interface gráfica lúdica ("Animal Cross
 
 | Prioridade | Ação Recomendada | Impacto |
 |---|---|:---:|
-| **Alta** | Prosseguir com a extração dos handlers restantes de `src/main/index.ts` (`configIpc`, `integrationsIpc`, `ptyIpc`). | Manutenibilidade |
+| **Alta** | Prosseguir com a extração dos handlers restantes de `src/main/index.ts` (`configIpc`, `ptyIpc`). | Manutenibilidade |
 | **Média** | Atualizar dependência de `tunnelmole` ou substituir o utilitário de túnel para eliminar alerta de Prototype Pollution em `toml`. | Segurança |
 | **Média** | Criar opção de "Modo Econômico" para limitar loops de verificação quando o sistema operar em bateria. | Performance |
 | **Estratégica** | Expandir suporte de ferramentas para servidores de contexto MCP (Model Context Protocol). | Expansão de Produto |
