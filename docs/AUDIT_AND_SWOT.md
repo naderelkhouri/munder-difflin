@@ -113,6 +113,7 @@ A proposta de valor é ancorada em uma interface gráfica lúdica ("Animal Cross
    * Criação do módulo [`src/main/ipc/integrationsIpc.ts`](../src/main/ipc/integrationsIpc.ts) para registro seguro de REST integrations e chaves BYOK de provedores.
    * Criação do módulo [`src/main/ipc/ptyIpc.ts`](../src/main/ipc/ptyIpc.ts) para ciclo de vida e streaming I/O de terminais.
    * Criação do módulo [`src/main/ipc/rosterIpc.ts`](../src/main/ipc/rosterIpc.ts) para persistência e sincronização de roster.
+   * Criação do módulo [`src/main/ipc/configIpc.ts`](../src/main/ipc/configIpc.ts) para gerenciamento de configurações, ciclo de vida de `harnessHome`, onboarding e migração de diretórios com recuperação automática.
    * Criação do módulo de compartilhamento [`src/shared/providerKeys.ts`](../src/shared/providerKeys.ts).
    * Criação do ponto de montagem central [`src/main/ipc/index.ts`](../src/main/ipc/index.ts).
    * Refatoração expressiva de [`src/main/index.ts`](../src/main/index.ts), reduzindo centenas de linhas e isolando responsabilidades.
@@ -120,9 +121,11 @@ A proposta de valor é ancorada em uma interface gráfica lúdica ("Animal Cross
    * Integração de detecção de bateria via `powerMonitor.isOnBatteryPower()`.
    * Adaptação automática do `KeepAwakeMode`: quando em bateria, a suspensão de tela do sistema operacional volta a ser permitida, evitando esgotamento prematuro de bateria em laptops.
    * Listeners de eventos de alimentação (`on-battery`, `on-ac`) para re-sincronização em tempo real.
-3. **Higiene de Dependências e Segurança:**
+3. **Higiene de Dependências e Mitigação de Segurança:**
    * Remoção de dependências órfãs `localtunnel` e `@types/localtunnel` (substituídas na v0.2.4 por `tunnelmole` mas retidas no manifesto).
-   * Redução das vulnerabilidades apontadas pelo `npm audit` de 22 para 20.
+   * Correção da vulnerabilidade crítica em `toml` (parser transitivo do `tunnelmole` com Prototype Pollution e DoS) via `overrides` para `^4.3.0`.
+   * Atualização de segurança do framework `hono` via `npm audit fix`.
+   * Redução das vulnerabilidades apontadas pelo `npm audit` de 22 para 17.
    * Rebuild nativo bem-sucedido de `node-pty` e `better-sqlite3`.
 4. **Verificação Completa de Integridade:**
    * Execução de `npm run typecheck`: 0 erros de tipagem.
@@ -132,8 +135,9 @@ A proposta de valor é ancorada em uma interface gráfica lúdica ("Animal Cross
 
 ## 5. Roadmap e Recomendações Técnicas
 
-| Prioridade | Ação Recomendada | Impacto |
-|---|---|:---:|
-| **Alta** | Prosseguir com a extração dos handlers restantes de `src/main/index.ts` (`configIpc`). | Manutenibilidade |
-| **Média** | Atualizar dependência de `tunnelmole` ou substituir o utilitário de túnel para eliminar alerta de Prototype Pollution em `toml`. | Segurança |
-| **Estratégica** | Expandir suporte de ferramentas para servidores de contexto MCP (Model Context Protocol). | Expansão de Produto |
+| Prioridade | Ação Recomendada | Impacto | Status |
+|---|---|:---:|:---:|
+| **Alta** | Modularização dos handlers IPC de `src/main/index.ts` (`configIpc`, `ptyIpc`, `fsIpc`, etc.). | Manutenibilidade | **Concluído** |
+| **Média** | Mitigar vulnerabilidades em `toml` (transitório do `tunnelmole`) e atualizar dependências seguras. | Segurança | **Concluído** |
+| **Alta** | Avaliar migração controlada do Electron para versão mais recente com compatibilidade de módulos nativos. | Segurança / Upstream | Planejado |
+| **Estratégica** | Expandir suporte de ferramentas para servidores de contexto MCP (Model Context Protocol). | Expansão de Produto | Planejado |

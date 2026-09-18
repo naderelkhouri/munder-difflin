@@ -6,6 +6,7 @@ import { registerAppIpc } from './appIpc';
 import { registerIntegrationsIpc } from './integrationsIpc';
 import { registerRosterIpc } from './rosterIpc';
 import { registerPtyIpc } from './ptyIpc';
+import { registerConfigIpc, type ConfigIpcServices } from './configIpc';
 
 export { registerFsIpc } from './fsIpc';
 export { registerGitIpc } from './gitIpc';
@@ -13,11 +14,13 @@ export { registerAppIpc } from './appIpc';
 export { registerIntegrationsIpc } from './integrationsIpc';
 export { registerRosterIpc } from './rosterIpc';
 export { registerPtyIpc } from './ptyIpc';
+export { registerConfigIpc, type ConfigIpcServices } from './configIpc';
 
 export interface IpcRegistrationContext {
   ptyManager: PtyManager;
   roster?: RosterStore;
   onTeardownPty?: (id: string) => void;
+  configServices?: ConfigIpcServices;
 }
 
 /**
@@ -39,4 +42,9 @@ export function registerModularIpc(ctx: IpcRegistrationContext): void {
       onTeardown: ctx.onTeardownPty
     });
   }
+
+  if (ctx.configServices) {
+    registerConfigIpc(ctx.configServices);
+  }
 }
+
