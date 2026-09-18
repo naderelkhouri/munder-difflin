@@ -108,7 +108,6 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const ptyManager = new PtyManager();
-registerModularIpc({ ptyManager });
 
 function runCodexDaemonCommand(
   executable: string,
@@ -486,6 +485,8 @@ function teardownPty(id: string): void {
   syncKeepAwake();
 }
 
+registerModularIpc({ ptyManager, roster, onTeardownPty: teardownPty });
+
 /** Send an inform to the god agent (the human's proxy). The ephemeral-worker
  *  controller uses this to surface every terminal failure AND to carry the Slack
  *  {channel,thread_ts} so god can post a 'couldn't complete' reply — closing the
@@ -633,8 +634,12 @@ let keepAwakeId: number | null = null;
 let keepAwakeMode: KeepAwakeMode | null = null;
 function syncKeepAwake(): void {
   const live = ptyManager.list().length > 0;
+  const cfg = readConfig();
+  const onBattery = typeof powerMonitor.isOnBatteryPower === 'function' ? powerMonitor.isOnBatteryPower() : false;
+  // Battery awareness (audit enhancement): when running on battery power, avoid preventing display
+  // sleep unless strongKeepalive is explicitly set AND AC power is connected.
   const desired: KeepAwakeMode | null = live
-    ? (readConfig().strongKeepalive ? 'prevent-display-sleep' : 'prevent-app-suspension')
+    ? (cfg.strongKeepalive && !onBattery ? 'prevent-display-sleep' : 'prevent-app-suspension')
     : null;
   if (desired === keepAwakeMode) return; // no change — avoid stop/start churn + log spam
   // Tear down the current blocker (mode change, or going idle with no agents).
@@ -645,7 +650,7 @@ function syncKeepAwake(): void {
   keepAwakeMode = desired;
   if (desired) {
     keepAwakeId = powerSaveBlocker.start(desired);
-    console.log(`[power] keep-awake ON (${desired}) — agents running`);
+    console.log(`[power] keep-awake ON (${desired}${onBattery ? ', on battery' : ''}) — agents running`);
   } else {
     console.log('[power] keep-awake off — no agents');
   }
@@ -2999,28 +3004,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // record matches what the registry and the PTY actually used.
   return { ...res, cwd: opts.cwd, ...(worktreePath ? { worktreePath } : {}), ...(resumeNotFound ? { resumeNotFound: true } : {}), ...(didResume ? { resumed: true } : {}), ...(seedPrompt ? { seedPrompt } : {}) };
 }
-ipcMain.handle('pty:write', (_evt, id: string, data: string) => {
-  if (typeof id !== 'string' || typeof data !== 'string') return { ok: false, error: 'invalid args' };
-  return ptyManager.write(id, data);
-});
-ipcMain.handle('pty:resize', (_evt, id: string, cols: number, rows: number) => {
-  if (typeof id !== 'string' || typeof cols !== 'number' || typeof rows !== 'number') return { ok: false, error: 'invalid args' };
-  return ptyManager.resize(id, cols, rows);
-});
-ipcMain.handle('pty:redraw', (_evt, id: string) => {
-  if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
-  return ptyManager.redraw(id);
-});
-ipcMain.handle('pty:kill', (_evt, id: string) => {
-  if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
-  // Kill the process, then run the shared lifecycle teardown (archive the agent,
-  // remove its isolated worktree, drop the maps). teardownPty is idempotent, so
-  // node-pty firing onExit once the child actually dies is a harmless no-op.
-  const res = ptyManager.kill(id);
-  teardownPty(id);
-  return res;
-});
-ipcMain.handle('pty:list', () => ptyManager.list());
+// ─── IPC: pty (delegated to ./ipc/ptyIpc) ───────────────────────────────────
 
 // ─── IPC: analytics (the ONE renderer-facing seam) ──────────────────────────
 /** Count one human-sent message (TELEMETRY.md → `message_sent`). A COUNT, and
@@ -3176,15 +3160,8 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
 // ─── IPC: filesystem & git (delegated to ./ipc/fsIpc and ./ipc/gitIpc) ──────
 
 // ─── IPC: roster mirror (shared between dev and a packaged build) ───────────
-// The renderer's store is built synchronously at module load, before any async
-// IPC could resolve, so the read is `ipcMain.on` + `returnValue` — one blocking
-// round trip at boot, in exchange for the roster being correct on first paint
-// instead of flashing an empty floor and then filling in.
-// (`roster` itself is constructed earlier so HookServer can read standing goals.)
-ipcMain.on('roster:readSync', (evt) => { evt.returnValue = roster.read(); });
+// ─── IPC: roster mirror (delegated to ./ipc/rosterIpc) ──────────────────────
 ipcMain.on('config:homeSync', (evt) => { evt.returnValue = readConfig().harnessHome ?? null; });
-ipcMain.handle('roster:read', () => roster.read());
-ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.write(snap));
 
 // ─── IPC: hive (multi-agent coordination) ───────────────────────────────────
 ipcMain.handle('hive:registry', () => hive.registry());
@@ -5058,6 +5035,8 @@ app.whenReady().then(() => {
   powerMonitor.on('unlock-screen', () => onSystemResume('unlock-screen'));
   powerMonitor.on('suspend', () => { lastSuspendAt = Date.now(); console.log('[power] suspend — system sleeping'); });
   powerMonitor.on('lock-screen', () => { lastSuspendAt = Date.now(); console.log('[power] lock-screen'); });
+  powerMonitor.on('on-battery', () => { console.log('[power] on-battery — syncing keep-awake'); syncKeepAwake(); });
+  powerMonitor.on('on-ac', () => { console.log('[power] on-ac — syncing keep-awake'); syncKeepAwake(); });
   // Multi-window floors (opt-in): install the menu carrying "New Floor". When
   // off, the app keeps Electron's default menu — zero behavior change.
   if (readConfig().multiWindow) installAppMenu();
